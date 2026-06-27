@@ -1,0 +1,34 @@
+name: Feature Request
+description: Suggest a product, workflow, API, or infrastructure improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user, team, or operational problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired Outcome
+      description: What should be true when this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Add source links, customer evidence, product decisions, designs, or related issues.
+    validations:
+      required: false
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope Notes
+      description: What should be included or intentionally left out?
+    validations:
+      required: false
