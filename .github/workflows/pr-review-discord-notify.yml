@@ -1,0 +1,93 @@
+name: PR review request Discord notification
+
+# PR에 리뷰어가 지정되면 해당 리뷰어를 디스코드에서 멘션해 알린다.
+#
+# 조직의 여러 레포가 같은 알림을 쓰므로 로직은 이 레포에만 두고 각 레포는 호출만 한다.
+# 호출하는 쪽은 `pull_request`의 `review_requested` 타입으로 이 워크플로를 부른다.
+#
+# 리뷰어별 디스코드 ID는 호출한 레포의 `DISCORD_REVIEWER_MAP` 변수에서 읽는다.
+# 재사용 워크플로에서 `vars`는 호출한 레포(그리고 조직)의 변수로 해석되므로 입력값으로
+# 넘기지 않는다. 입력값은 실행 화면에 그대로 표시되어, public 레포에서는 구성원의
+# GitHub 계정과 디스코드 계정이 연결된 채로 공개된다.
+on:
+  workflow_call:
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        # 웹훅이 없으면 본문만 출력하고 전송하지 않는다. 알림 채널이 정해지기 전에도
+        # 호출하는 레포에 이 워크플로를 먼저 머지할 수 있다.
+        required: false
+
+jobs:
+  notify:
+    # 팀을 리뷰어로 지정하면 `requested_reviewer` 대신 `requested_team`이 오고, 멘션할
+    # 개인을 특정할 수 없다. 개인이 지정된 경우에만 실행한다.
+    if: github.event.requested_reviewer != null
+    runs-on: ubuntu-latest
+
+    # 이 잡은 저장소를 읽지 않고 API도 호출하지 않는다.
+    permissions: {}
+
+    steps:
+      - name: Notify requested reviewer
+        # PR 제목과 작성자는 신뢰할 수 없는 입력이므로 환경 변수로만 전달하고 스크립트에
+        # 직접 삽입하지 않는다.
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REVIEWER_MAP: ${{ vars.DISCORD_REVIEWER_MAP }}
+          REVIEWER_LOGIN: ${{ github.event.requested_reviewer.login }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+
+          # 작성자가 스스로를 리뷰어로 지정한 경우에는 알리지 않는다.
+          if [[ "$REVIEWER_LOGIN" == "$PR_AUTHOR" ]]; then
+            echo "작성자 본인이 리뷰어로 지정되어 알리지 않습니다." >&2
+            exit 0
+          fi
+
+          # 매핑에 없는 사람은 멘션 없이 GitHub 계정으로만 알린다. 매핑이 갖춰지지 않아서
+          # 알림 자체가 사라지면 리뷰 요청을 놓치게 되고, 원인도 드러나지 않는다.
+          mention="@${REVIEWER_LOGIN}"
+          if [[ -z "${REVIEWER_MAP:-}" ]]; then
+            echo "::warning::DISCORD_REVIEWER_MAP 변수가 없어 멘션 없이 보냅니다."
+          elif ! jq -e . >/dev/null 2>&1 <<< "$REVIEWER_MAP"; then
+            echo "::warning::DISCORD_REVIEWER_MAP이 올바른 JSON이 아니어서 멘션 없이 보냅니다."
+          else
+            discord_id="$(jq -r --arg login "$REVIEWER_LOGIN" '.[$login] // ""' <<< "$REVIEWER_MAP")"
+            if [[ -n "$discord_id" ]]; then
+              mention="<@${discord_id}>"
+            else
+              echo "::warning::${REVIEWER_LOGIN}의 Discord ID가 DISCORD_REVIEWER_MAP에 없어 멘션 없이 보냅니다."
+            fi
+          fi
+
+          # 디스코드 메시지 본문은 최대 2,000자다. 나머지 줄은 길이가 정해져 있고 제목만
+          # 길이를 예측할 수 없으므로 제목만 줄인다.
+          title="$PR_TITLE"
+          if (( ${#title} > 200 )); then
+            title="${title:0:197}..."
+          fi
+
+          # PR 링크는 꺾쇠로 감싸 미리보기 카드가 붙지 않게 한다. 알림마다 카드가 쌓이면
+          # 채널에서 다른 메시지를 읽기 어렵다.
+          content="${mention} 리뷰 요청이 왔습니다"$'\n\n'
+          content+="**${REPO_NAME} #${PR_NUMBER}** ${title}"$'\n'
+          content+="작성자 @${PR_AUTHOR}"$'\n\n'
+          content+="<${PR_URL}>"
+
+          if [[ -z "${DISCORD_WEBHOOK_URL:-}" ]]; then
+            echo "웹훅 URL이 없어 전송하지 않고 본문만 출력합니다." >&2
+            printf '%s\n' "$content"
+            exit 0
+          fi
+
+          # 멘션은 본문에 쓴 사용자에게만 허용한다. 지정하지 않으면 PR 제목에 들어 있는
+          # `@everyone` 같은 문자열이 그대로 멘션으로 동작한다.
+          jq -n --arg content "$content" --arg id "${discord_id:-}" \
+            '{ content: $content,
+               allowed_mentions: { parse: [], users: (if $id == "" then [] else [$id] end) } }' \
+            | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$DISCORD_WEBHOOK_URL" >/dev/null
